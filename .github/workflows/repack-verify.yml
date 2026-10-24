@@ -1,0 +1,74 @@
+name: Repack deb with webkit Depends and verify
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  repack-verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - name: Download built deb
+        uses: actions/download-artifact@v4
+        with:
+          name: piliplus-linux-arm64-deb
+          run-id: 40083156574
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Repack with fixed Depends
+        run: |
+          set -eux
+          DEB="PiliPlus_linux_2.1.6+5472_arm64.deb"
+          PKG="PiliPlus_linux_2.1.6+5472_arm64"
+          mv "$DEB" original.deb
+          rm -rf "$PKG"
+          dpkg-deb -R original.deb "$PKG"
+          sed -i 's|^Depends: libgtk-3-0t64,|Depends: libgtk-3-0t64,\n         libwebkit2gtk-4.1-0,|' "$PKG/DEBIAN/control"
+          cat "$PKG/DEBIAN/control"
+          dpkg-deb --build --root-owner-group -Zzstd "$PKG" "$DEB"
+          dpkg-deb --info "$DEB"
+
+      - name: Install with apt and check deps
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y ./PiliPlus_linux_2.1.6+5472_arm64.deb
+          dpkg -s piliplus | head -12
+          ls -la /usr/bin/piliplus
+          ls -la /opt/PiliPlus | head
+          file /opt/PiliPlus/piliplus /opt/PiliPlus/lib/libapp.so
+          echo "--- unresolved shared libs ---"
+          ldd /opt/PiliPlus/piliplus | grep "not found" || echo "none"
+          echo "--- webkit runtime ---"
+          dpkg -s libwebkit2gtk-4.1-0 | grep -E "^(Status|Architecture|Version)"
+
+      - name: Launch installed app under Xvfb
+        run: |
+          set -ux
+          sudo apt-get install -y --no-install-recommends xvfb dbus-x11
+          xvfb-run -a timeout 25 piliplus > /tmp/app.log 2>&1
+          RC=$?
+          echo "exit=$RC"
+          grep -iE "error|critical" /tmp/app.log | head -20 || true
+          tail -5 /tmp/app.log || true
+          # 124 = still running when timeout hit => started fine
+          if [ "$RC" = "124" ]; then echo "STARTUP_OK"; else echo "STARTUP_FAILED rc=$RC"; exit 1; fi
+
+      - name: Uninstall and verify cleanup
+        run: |
+          set -eux
+          sudo apt-get remove -y piliplus
+          if [ -e /usr/bin/piliplus ]; then echo "ERROR: symlink still present"; exit 1; else echo "OK: /usr/bin/piliplus removed"; fi
+          if [ -d /opt/PiliPlus ]; then echo "ERROR: payload dir still present"; exit 1; else echo "OK: /opt/PiliPlus removed"; fi
+          dpkg -s piliplus 2>/dev/null && { echo "ERROR: still registered"; exit 1; } || echo "OK: not registered"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: piliplus-linux-arm64-deb-fixed
+          path: PiliPlus_linux_2.1.6+5472_arm64.deb
+          if-no-files-found: error
+          retention-days: 7
