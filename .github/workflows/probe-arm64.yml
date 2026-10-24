@@ -1,0 +1,44 @@
+name: Probe arm64 runner + Flutter bootstrap
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Env info
+        run: |
+          echo "uname: $(uname -a)"
+          echo "arch: $(dpkg --print-architecture)"
+          nproc; free -h; df -h / | tail -1
+          clang --version | head -1
+          cmake --version | head -1
+          ninja --version
+          pwsh --version || echo "no pwsh"
+
+      - name: Bootstrap Flutter 3.47.7 from source (native arm64)
+        env:
+          FLUTTER_SUPPRESS_ANALYTICS: "true"
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch 3.47.7 https://github.com/flutter/flutter.git "$HOME/flutter"
+          git config --global --add safe.directory "$HOME/flutter"
+          export PATH="$HOME/flutter/bin:$PATH"
+          echo "FLUTTER_ROOT=$HOME/flutter" >> "$GITHUB_ENV"
+          echo "PATH=$HOME/flutter/bin:$PATH" >> "$GITHUB_ENV"
+          flutter --version
+          flutter doctor -v || true
+          dart --version
+          ls "$HOME/flutter/bin/cache/dart-sdk/bin"
+          file "$HOME/flutter/bin/cache/dart-sdk/bin/dart" || true
+          file "$HOME/flutter/bin/cache/artifacts/engine/"*/gen_snapshot 2>/dev/null || true
+
+      - name: Confirm artifact upload channel
+        run: |
+          echo "probe-ok $(date -u +%FT%TZ) arch=$(uname -m)" > probe.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe
+          path: probe.txt
