@@ -1,0 +1,56 @@
+name: Verify arm64 deb install
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Download built deb from build run
+        uses: actions/download-artifact@v4
+        with:
+          name: piliplus-linux-arm64-deb
+          run-id: 40083156574
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inspect package
+        run: |
+          set -x
+          ls -la
+          dpkg-deb --info PiliPlus_linux_2.1.6+5472_arm64.deb
+          dpkg-deb --contents PiliPlus_linux_2.1.6+5472_arm64.deb | head -25
+
+      - name: Install with apt (resolves Depends)
+        run: |
+          set -x
+          sudo apt-get update
+          sudo apt-get install -y ./PiliPlus_linux_2.1.6+5472_arm64.deb
+          dpkg -s PiliPlus
+          ls -la /usr/bin/piliplus
+          ls -la /opt/PiliPlus
+          file /opt/PiliPlus/piliplus /opt/PiliPlus/lib/libapp.so
+          file /opt/PiliPlus/lib/*.so
+          echo "--- unresolved deps (should be empty) ---"
+          ldd /opt/PiliPlus/piliplus | grep "not found" || echo "none"
+
+      - name: Launch installed app under Xvfb
+        continue-on-error: true
+        run: |
+          set -x
+          sudo apt-get install -y --no-install-recommends xvfb dbus-x11
+          xvfb-run -a timeout 25 piliplus > /tmp/app.log 2>&1 || echo "exit=$?"
+          head -60 /tmp/app.log || true
+
+      - name: Uninstall and verify cleanup
+        run: |
+          set -x
+          sudo apt-get remove -y PiliPlus
+          if [ -e /usr/bin/piliplus ]; then echo "ERROR: symlink still present"; exit 1; else echo "OK: /usr/bin/piliplus removed"; fi
+          if [ -d /opt/PiliPlus ]; then echo "ERROR: payload dir still present"; exit 1; else echo "OK: /opt/PiliPlus removed"; fi
+          dpkg -s PiliPlus 2>/dev/null && echo "ERROR: package still registered" || echo "OK: package not registered"
