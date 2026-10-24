@@ -103,6 +103,8 @@ jobs:
           # control: version / architecture / installed size
           sed -i "s|^Version: .*|Version: ${VERSION}|" "$PKG/DEBIAN/control"
           sed -i "s|^Architecture: .*|Architecture: ${ARCH}|" "$PKG/DEBIAN/control"
+          # piliplus links libwebkit2gtk-4.1.so.0 directly; upstream Depends misses it
+          sed -i "s|^Depends: libgtk-3-0t64,|Depends: libgtk-3-0t64,\n         libwebkit2gtk-4.1-0,|" "$PKG/DEBIAN/control"
           SIZE_KB=$(du -s -B1 --apparent-size "$PKG" | awk '{print $1}')
           SIZE_DEBIAN=$(du -s -B1 --apparent-size "$PKG/DEBIAN" | awk '{print $1}')
           SIZE_KB=$(( (SIZE_KB - SIZE_DEBIAN + 1023) / 1024 ))
