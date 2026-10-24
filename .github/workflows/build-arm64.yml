@@ -52,9 +52,10 @@ jobs:
           echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
           flutter --version
           flutter config --enable-linux-desktop
+          flutter precache --linux
           dart --version
           file "$HOME/flutter/bin/cache/dart-sdk/bin/dart"
-          find "$HOME/flutter/bin/cache/artifacts/engine" -name gen_snapshot -exec file {} \;
+          find "$HOME/flutter/bin/cache/artifacts/engine" -name gen_snapshot -exec file {} \; || true
 
       - name: Clone PiliPlus source at tag
         run: |
