@@ -1,0 +1,145 @@
+name: Package arm64 deb with fontconfig engine
+
+# 用官方源码编译出的“带 Fontconfig 的 arm64 引擎”替换 deb 内的 libflutter_linux_gtk.so，
+# 重新打包并在一台干净的 arm64 机器上安装、启动、截图验证中文渲染。
+# 依赖两个上游产物：
+#   1. build-engine-fontconfig.yml 产出的 libflutter_linux_gtk.fontconfig-arm64
+#   2. build-arm64.yml 产出的原始 arm64 deb（作为载荷基线）
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine_run_id:
+        description: "Run ID of Build Flutter Engine (linux-arm64 + fontconfig)"
+        required: true
+        default: "40145076220"
+      base_deb_run_id:
+        description: "Run ID of the arm64 deb build (base payload)"
+        required: true
+        default: "40083156574"
+      version_suffix:
+        description: "Debian version suffix"
+        required: false
+        default: ".2"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  package:
+    name: Repack + verify arm64 deb (fontconfig engine)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Download fontconfig engine SO
+        uses: actions/download-artifact@v4
+        with:
+          name: libflutter_linux_gtk.fontconfig-arm64
+          run-id: ${{ inputs.engine_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: engine
+
+      - name: Download base arm64 deb
+        uses: actions/download-artifact@v4
+        with:
+          name: piliplus-linux-arm64-deb
+          run-id: ${{ inputs.base_deb_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: base
+
+      - name: Inspect inputs
+        run: |
+          set -eux
+          find engine base -type f -exec ls -la {} \;
+          file engine/libflutter_linux_gtk.so.arm64-fontconfig
+          readelf -d engine/libflutter_linux_gtk.so.arm64-fontconfig | grep -i fontconfig
+
+      - name: Repack deb with fontconfig engine
+        run: |
+          set -eux
+          VERSION="2.1.6+5472${{ inputs.version_suffix }}"
+          PKG="PiliPlus_linux_${VERSION}_arm64"
+          BASE_DEB=$(find base -name '*.deb' | head -1)
+          rm -rf "$PKG"
+          mkdir -p "$PKG"
+          dpkg-deb -R "$BASE_DEB" "$PKG"
+
+          # 替换引擎
+          cp engine/libflutter_linux_gtk.so.arm64-fontconfig "$PKG/opt/PiliPlus/lib/libflutter_linux_gtk.so"
+          chmod 0644 "$PKG/opt/PiliPlus/lib/libflutter_linux_gtk.so"
+          file "$PKG/opt/PiliPlus/lib/libflutter_linux_gtk.so"
+
+          # 版本 / 架构 / 依赖（补 webkit + fontconfig 运行时 + 中文字体推荐）
+          sed -i "s|^Version: .*|Version: ${VERSION}|" "$PKG/DEBIAN/control"
+          sed -i "s|^Architecture: .*|Architecture: arm64|" "$PKG/DEBIAN/control"
+          if ! grep -q "libwebkit2gtk-4.1-0" "$PKG/DEBIAN/control"; then
+            sed -i "s|^Depends: libgtk-3-0t64,|Depends: libgtk-3-0t64,\n         libwebkit2gtk-4.1-0,\n         libfontconfig1,|" "$PKG/DEBIAN/control"
+          fi
+          grep -q "^Recommends:" "$PKG/DEBIAN/control" || \
+            sed -i "s|^Essential: .*|&\nRecommends: fonts-noto-cjk|" "$PKG/DEBIAN/control"
+
+          # 安装大小
+          SIZE_KB=$(du -s -B1 --apparent-size "$PKG" | awk '{print $1}')
+          SIZE_DEBIAN=$(du -s -B1 --apparent-size "$PKG/DEBIAN" | awk '{print $1}')
+          SIZE_KB=$(( (SIZE_KB - SIZE_DEBIAN + 1023) / 1024 ))
+          sed -i "s|^Installed-Size: .*|Installed-Size: ${SIZE_KB}|" "$PKG/DEBIAN/control"
+
+          # md5sums（引擎文件已变，需要重算）
+          (
+            cd "$PKG"
+            md5sum opt/PiliPlus/piliplus opt/PiliPlus/lib/* opt/PiliPlus/data/icudtl.dat > DEBIAN/md5sums
+          )
+          chmod 0644 "$PKG/DEBIAN/control" "$PKG/DEBIAN/md5sums"
+          chmod 0755 "$PKG/DEBIAN/postinst" "$PKG/DEBIAN/postrm" "$PKG/DEBIAN/prerm"
+
+          cat "$PKG/DEBIAN/control"
+          dpkg-deb --build --root-owner-group -Zzstd "$PKG" "${PKG}.deb"
+          DEB="${PKG}.deb"
+          ls -la "$DEB"
+          dpkg-deb --info "$DEB"
+          dpkg-deb -f "$DEB" Package Version Architecture Depends
+          sha256sum "$DEB"
+          echo "DEB_NAME=$DEB" >> "$GITHUB_ENV"
+
+      - name: Install and verify fontconfig engine works
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb dbus-x11 imagemagick fonts-noto-cjk
+          echo "--- system CJK fonts (what the device has) ---"
+          fc-list :lang=zh | head -3 || true
+          sudo apt-get install -y "./${DEB_NAME}"
+
+          echo "--- installed engine links fontconfig? ---"
+          readelf -d /opt/PiliPlus/lib/libflutter_linux_gtk.so | grep -i fontconfig
+          dpkg -s piliplus | head -8
+
+          echo "--- launch app under Xvfb and capture screenshot ---"
+          export XDG_RUNTIME_DIR=/tmp/xdg-runtime
+          mkdir -p "$XDG_RUNTIME_DIR"
+          xvfb-run -a -s "-screen 0 1440x2560x24" bash -c '
+            piliplus > /tmp/app.log 2>&1 &
+            APP=$!
+            sleep 20
+            import -window root /tmp/piliplus-fontconfig.png || true
+            kill $APP 2>/dev/null || true
+          ' || true
+          ls -la /tmp/piliplus-fontconfig.png
+          head -40 /tmp/app.log || true
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: piliplus-linux-arm64-deb-fontconfig
+          path: ${{ env.DEB_NAME }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload screenshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: piliplus-fontconfig-screenshot
+          path: /tmp/piliplus-fontconfig.png
+          if-no-files-found: warn
+          retention-days: 7
